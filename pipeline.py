@@ -1,6 +1,5 @@
 from model import LM
 from text_processing import JsonUtils, PromptBases, PoolFilter, Config, ModelParser, PromptBuilder
-from multiprocessing import pool
 
 class Pipeline:
     """
