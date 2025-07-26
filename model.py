@@ -4,7 +4,7 @@ import time
 class LM:
     def __init__(self, api_key=None):
         if api_key is None:
-            with open("openrouter_api_key.txt") as f:
+            with open("open_router_api_key.txt") as f:
                 api_key = f.read().strip()
         
         self.client = OpenAI(

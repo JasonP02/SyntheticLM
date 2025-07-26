@@ -1,6 +1,8 @@
 import json
 import re
+import random
 from dataclasses import dataclass
+import pyparsing as pp
 
 @dataclass
 class Config:
@@ -9,6 +11,7 @@ class Config:
     max_iterations: int = 1
     model_name: str = "google/gemma-3n-e2b-it:free"
     max_tokens: int = 25
+
 
 class DataProcessor:
     def __init__(self, data_path):
@@ -27,21 +30,7 @@ class DataProcessor:
             for item in data:
                 f.write(json.dumps(item) + '\n')
 
-    def parse_task_class(self, classification_input_prompt, output_classes):
-        # Extract tasks from classification_input_prompt
-        task_lines = re.findall(r"Task:\s*(.+)", classification_input_prompt)
-        
-        # Extract class labels from output_classes (last word in each line)
-        class_lines = [line.strip() for line in output_classes.split('\n') if line.strip()]
-        class_labels = [line.split()[-1] for line in class_lines]  # "Yes" or "No"
-
-        print(f"Classes found: {class_labels}")
-        print(f"Tasks found: {task_lines}")
-
-        # Pair them up
-        return [{"task": task, "class": label} for task, label in zip(task_lines, class_labels)]
-
-class PromptCreator:
+class PromptBases:
     def __init__(self):
         pass
 
@@ -49,7 +38,7 @@ class PromptCreator:
         """
         Create a prompt for the model to generate new tasks based on the pool text.
         """
-        return f"""Come up with a series of tasks that are unique. There should be both classification and non-classification tasks. The task shall have enough information to return an answer. Follow after Task {config.num_seed_tasks}. Follow the existing format with no changes or commentary.\n{pool_text}"""
+        return f"""Come up with a series of tasks that are unique. There should be both classification and non-classification tasks; do not label them. The task shall have enough information to return an answer. Follow after Task {config.num_seed_tasks}. Follow the existing format with no changes or commentary.\n{pool_text}"""
 
     def create_classification_prompt(self, prompt_dict):
         """
@@ -57,29 +46,140 @@ class PromptCreator:
         """
         tasks = prompt_dict["instruction"]
         classes = prompt_dict["is_classification"]
-        
-        prompt = "Can the following task be regarded as a classification task with finite output labels? Follow the provided format with no elaboration. Only return classification for Tasks that have a number.\n"
-        
+
+        prompt = "Can the following task be regarded as a classification task with finite output labels? Follow the existing format.\n"
+
         for i in range(len(tasks)):
             label = "Yes" if classes[i] else "No"
             prompt += f"Task: {tasks[i]}\nIs it classification? {label}\n"
         
         return prompt
 
-    def create_instance_generation_prompt(self, prompt_dict, task_type):
+    def create_instance_generation_prompt(self, regression_tasks, classification_tasks):
         """
         Create a prompt for the model to generate instances based on task type.
         """
-        tasks = prompt_dict["instruction"]
-        classification = prompt_dict["class"]
+        regression_prompt = f"Come up with examples for the following tasks. Try to generate multiple examples when possible. If the task doesn't require additional input, you can generate the output directly. \n {regression_tasks}\n"
+        classification_prompt = f"Given the classification task definition and the class labels, generate an input that corresponds to each of the class labels. If the task doesn't require input, just generate the correct class label.\n {classification_tasks}"
+        return regression_prompt, classification_prompt
 
-        
-        if classification == "No":
-            return f"""Come up with examples for the following tasks. Try to generate multiple examples when possible. If the task doesn't require additional input, you can generate the output directly. \n {tasks}\n"""
-        elif classification == "Yes":
-            return f"""Given the classification task definition and the class labels, generate an input that corresponds to each of the class labels. If the task doesn't require input, just generate the correct class label.\n {tasks}"""
+
+class PromptBuilder:
+    def __init__(self):
+        self.cfg = Config()
+        self.prompt_creator = PromptBases()
+
+
+    def format_pool_prompts(self, prompt_samples):
+        """
+        Obtain pool prompts from the model for classification.
+        """
+        # Format the pool prompts into a usable format
+        pool_text = ""
+        for idx, task in enumerate(prompt_samples["instruction"], 1):
+            pool_text += f"Task {idx}: {task}\n"
+
+        pool_input_prompt = self.prompt_creator.create_pool_task_prompt(pool_text, self.cfg)
+        return pool_input_prompt
+
+    
+    def format_classification_classification(self):
+        pass
+
+    def format_instance_generation(self, task_classification, task_regression):
+        """
+        Takes in regression and classification tasks -> generates:
+        instances for regression
+        inputs for classification
+        """
+
+class ModelParser:
+    def __init__(self):
+        pass
+
+    def get_pool_tasks(self, human_tasks, llm_tasks, total_needed):
+        """Sample seed tasks with ratio of human and llm generated tasks"""
+
+        # Determine the split of human to model prompts
+        if len(llm_tasks) < 10:
+            human_ratio = 1.0
         else:
-            raise ValueError(f"Invalid task type: {task_type}")
+            human_ratio = 0.8
+
+        num_human = int(total_needed * human_ratio)
+        num_llm = total_needed - num_human
+
+        human_sample_indices = random.sample(human_tasks, min(num_human, len(human_tasks)))
+
+        # Sample from LLM tasks
+        if llm_tasks and num_llm > 0:
+            llm_sample_indices = random.sample(llm_tasks, min(num_llm, len(llm_tasks)))
+        else:
+            llm_sample_indices = []
+            
+        # Extract the sampled tasks for the pipeline
+        human_pool_prompts = [task["instruction"] for task in human_sample_indices]
+        llm_pool_prompts = [task["instruction"] for task in llm_sample_indices]
+
+        return {
+            "instruction": human_pool_prompts + llm_pool_prompts,
+            "is_classification": [task["is_classification"] for task in human_sample_indices] + [task["is_classification"] for task in llm_sample_indices]
+        }
+
+    def format_classification_outputs(self, task_class_str):
+        """
+        Parse a string of tasks and their classification labels.
+        Example input: "Task 1: Classification\nIs it classification? Yes\nTask 2: Regression\nIs it classification? No"
+        Returns a list of dictionaries with 'id', 'task', and 'is_classification' keys.
+        """
+        task_keyword = pp.CaselessLiteral("Task")
+        task_id = pp.pyparsing_common.integer('id') 
+        colon = pp.Suppress(':')
+        task_body = pp.restOfLine("task_description")
+
+        class_keyword = pp.CaselessLiteral("Is it classification?")
+        class_value = pp.one_of('Yes No', caseless=True)('is_cls')
+
+        task_line = task_keyword + task_id + colon + task_body + pp.LineEnd()
+        class_line = class_keyword + class_value + pp.LineEnd()
+        task_block = task_line + class_line
+        
+        # Parse all task blocks
+        regression_tasks = []
+        classifciation_tasks = []
+        for tokens, start, end in task_block.scanString(task_class_str):
+            if 'is_classification': tokens.is_cls.lower() == 'yes':
+                classification_tasks.append('task': tokens.task_description.strip())
+            elif 'is_classification': tokens_.is_cls.lower() == 'no':
+                regression_tasks.append('task': tokens.task.description.strip())
+            else:
+                print(f"Could not filter for id: {tokens.task_id}")
+        
+        return results
+
+
+    def split_tasks_by_classification(self, tasks):
+        """
+        Splits parsed tasks into classification and non-classification dictionaries.
+        
+        Args:
+            tasks: List of dicts from parse_task_class, each with 'id', 'task', 'is_classification'
+            
+        Returns:
+            Tuple of (classification_dict, nonclassification_dict) with ID as key and task as value
+        """
+        classification_tasks = []
+        nonclassification_tasks = []
+        
+        for task in tasks:
+            task_id = str(task['id'])  # Ensure consistent string keys
+            if task['is_classification']:
+                classification_tasks.append(task['task'])
+            else:
+                nonclassification_tasks.append(task['task'])
+                
+        return classification_tasks, nonclassification_tasks
+
 
 class PoolFilter:
     def __init__(self):

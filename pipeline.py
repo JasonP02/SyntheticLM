@@ -1,83 +1,57 @@
 import random
 from model import LM
-from text_processing import DataProcessor, PromptCreator, PoolFilter, Config
+from text_processing import JsonUtils, PromptBases, PoolFilter, Config, ModelParser, PromptBuilder
 
 class Pipeline:
+    """
+    Main pipeline for the self-instruct paper
+    Includes methods for the primary pipeline, including parsing of model outputs
+    """
     def __init__(self):
-        self.data_processor = DataProcessor("seed_tasks.jsonl")
-        self.prompt_creator = PromptCreator()
+        self.json_utils = JsonUtils("seed_tasks.jsonl")
+        self.prompt_builder = PrompBuilder()
         self.pool_filter = PoolFilter()
+        self.model_parser = ModelParser()
+        self.prompt_bases = PromptBases()
         self.llm_seed_tasks = []
-        self.human_seed_tasks = self.data_processor.load_data()
+        self.human_seed_tasks = self.json_utils.load_data()
         self.model = LM()
         self.cfg = Config()
-
-    def get_pool_tasks(self, human_tasks, llm_tasks, total_needed):
-        """Sample seed tasks with ratio of human and llm generated tasks"""
-
-        if len(llm_tasks) < 10:
-            human_ratio = 1.0
-        else:
-            human_ratio = 0.8
-
-        num_human = int(total_needed * human_ratio)
-        num_llm = total_needed - num_human
-
-        human_sample_indices = random.sample(human_tasks, min(num_human, len(human_tasks)))
-
-        # Sample from LLM tasks
-        if llm_tasks and num_llm > 0:
-            llm_sample_indices = random.sample(llm_tasks, min(num_llm, len(llm_tasks)))
-        else:
-            llm_sample_indices = []
             
-        human_pool_prompts = [task["instruction"] for task in human_sample_indices]
-        llm_pool_prompts = [task["instruction"] for task in llm_sample_indices]
-
-        return {
-            "instruction": human_pool_prompts + llm_pool_prompts,
-            "is_classification": [task["is_classification"] for task in human_sample_indices] + [task["is_classification"] for task in llm_sample_indices]
-        }
-            
-    def format_pool_prompts(self, prompt_samples):
-        """
-        Obtain pool prompts from the model for classification.
-        """
-        pool_text = ""
-        for idx, task in enumerate(prompt_samples["instruction"], 1):
-            pool_text += f"Task {idx}: {task}\n"
-
-        pool_input_prompt = self.prompt_creator.create_pool_task_prompt(pool_text, self.cfg)
-        return pool_input_prompt
-    
     def run_pipeline(self):
         for i in range(self.cfg.max_iterations):
 
-            sample_tasks = self.get_pool_tasks(
+            # Step 1a: Get examples for task generation
+            sample_tasks = self.model_parser.get_pool_tasks(
                 self.human_seed_tasks,
                 self.llm_seed_tasks,
                 self.cfg.num_seed_tasks,
             )
 
-            # Step 1: Generate pool tasks from human and LLM seed tasks
-            formatted_pool_tasks = self.format_pool_prompts(sample_tasks)
+            # Step 1b: Format the examples in a useful format
+            formatted_pool_tasks = self.prompt_builder.format_pool_prompts(sample_tasks)
+            # Step 1c: Run the model to produce new tamodel_formattersks
             output_tasks = self.model.run_model(formatted_pool_tasks)
 
-            # Step 2: Classify the generated tasks as classification or regression
-            classification_input_prompt = self.prompt_creator.create_classification_prompt(sample_tasks)
-            output_classes = self.model.run_model(classification_input_prompt + (output_tasks or ""))
-            print(output_classes)
-            
-            # Step 3: Generate data based on the task type
-            # First, we need to split up the output_classes based on whether they are classification or not, then feed into model with distinct prompts
 
-            parsed_class_data = self.data_processor.parse_task_class(classification_input_prompt, output_classes)
-            print(parsed_class_data)
+            # Step 2a: Create basic classification prompt for LLM to understand the goal using in-context learning
+            human_labeled_classification_input_prompt = self.prompt_bases.create_classification_prompt(sample_tasks)
 
-            # parsed_class_data is a list of dicts: [{"task": ..., "class": ...}, ...]
+            # Step 2b: Join the example prompt with the LLM outputs
+            if output_tasks:
+                classification_input_prompt = (human_labeled_classification_input_prompt + "\n" + output_tasks)
+            else:
+                print("No LLM generated tasks, there is an error")
 
-            classification_tasks = [item["task"] for item in parsed_class_data if item["class"].lower().startswith("y")]
-            regression_tasks = [item["task"] for item in parsed_class_data if item["class"].lower().startswith("n")]
+            # Step 2c: Run the model to generate "Task, Is classification" format
+            output_classes = self.model.run_model(classification_input_prompt)
 
-            print("Classification tasks:", classification_tasks)
-            print("Regression tasks:", regression_tasks)
+            # Step 3a: Parse the output of the tasks to return the two task types
+            classification_tasks, regression_tasks = self.model_parser.format_classification_outputs(output_classes)
+
+
+            # Step 3c: Run the model to generate examples using the class method
+            regression_instance_prompt, classification_prompt = self.prompt_bases.create_instance_generation_prompt(regression_tasks, classification_tasks)
+
+            # Step 4: Instance generation
+            instances = self.
