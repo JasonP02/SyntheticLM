@@ -4,6 +4,7 @@ import re
 import random
 from dataclasses import dataclass
 import pyparsing as pp
+import evaluate
 
 @dataclass
 class Config:
@@ -11,6 +12,9 @@ class Config:
     human_seed_ratio: float = 0.8
     max_iterations: int = 1
     model_name: str = "google/gemma-3n-e2b-it:free"
+    len_threshold = 150
+    bad_words = ['picture', 'image', 'graph']
+    rouge_threshold = 0.7
 
 
 class JsonUtils:
@@ -185,22 +189,28 @@ class ModelParser:
 
 class PoolFilter:
     def __init__(self):
-        pass
+        self.cfg = Config()
 
     def filter_bad_words(self, prompts):
-        bad_words = ['picture', 'image', 'graph']
-
-        for bw in bad_words:
-            for i in range(len(prompts)):
-                if bw not in prompts[i]:
-                    pass
-                else:
-                    prompts[i].pop() # Remove if failed check
-
-        return prompts
+        """
+        Iterates over prompts, excluding ones that contain 'bad words'
+        """
+        return [p for p in prompts if not any(bw in p for bw in self.cfg.bad_words)]
 
     def filter_length(self, prompts):
+        return [p for p in prompts if len(p) >= self.cfg.len_threshold]
 
-    def filter_tasks(self, prompts):
+    def filter_ROUGE(self, prompts, reference):
+        rouge = evaluate.load('rouge')
+        filtered = []
+        for p in prompts:
+            result = rouge.compute(predictions=p, references=reference)
+            if result['rougeL'] < self.cfg.rouge_threshold:
+                filtered.append(p)
+        return filtered
+
+    def filter_tasks(self, prompts, pool_tasks):
         prompts = self.filter_bad_words(prompts)
         prompts = self.filter_length(prompts)
+        prompts = self.filter_ROUGE(prompts, pool_tasks)
+        return prompts
